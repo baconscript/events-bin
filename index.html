@@ -1,0 +1,199 @@
+<html><head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="//maxcdn.bootstrapcdn.com/bootswatch/3.3.4/yeti/bootstrap.min.css">
+  <script src="//code.jquery.com/jquery-2.1.1.min.js"></script>
+  <script src="http://static.jsbin.com/js/vendor/traceur.js"></script>
+  <script src="http://afarkas.github.io/remote-list/dist/remote-list.min.js"></script>
+  <script src="//cdnjs.cloudflare.com/ajax/libs/lodash.js/3.6.0/lodash.min.js"></script>
+  <script src="//cdnjs.cloudflare.com/ajax/libs/js-yaml/3.2.7/js-yaml.min.js"></script>
+  <script src="//cdnjs.cloudflare.com/ajax/libs/then-request/2.1.1/request.min.js"></script>
+  <script src="//cdnjs.cloudflare.com/ajax/libs/Base64/0.3.0/base64.min.js"></script>
+  <script src="//cdnjs.cloudflare.com/ajax/libs/pouchdb/3.3.1/pouchdb.min.js"></script>
+  <meta charset="utf-8">
+<!--
+Created using JS Bin
+http://jsbin.com
+
+Copyright (c) 2015 by baconscript (http://jsbin.com/munuxo/20/edit)
+
+Released under the MIT license: http://jsbin.mit-license.org
+-->
+<meta name="robots" content="noindex">
+  <title>JS Bin</title>
+</head>
+<body class="container">
+  <h2>Events Bin v0.6</h2>
+  <form>
+  <input type="search" id="_class" class="form-control">
+  <br>
+  <textarea id="event" rows="10" cols="60" class="form-control"></textarea>
+    <br>
+  <input type="file" id="file">
+  <br>
+  <a class="btn btn-success btn-lg btn-block" id="ok">Ok</a>
+  </form>
+  <br>
+  <div id="err"></div>
+  <div id="log"></div>
+  <script type="text/x-template" id="event-tpl">
+    <h3><%- record.meta.class %></h3>
+    <pre><%- jsyaml.dump(record) %></pre>
+  </script>
+<script>
+"use strict";
+
+var uuid = function b(a) {
+  return a ? (a ^ Math.random() * 16 >> a / 4).toString(16) : ([10000000] + -1000 + -4000 + -8000 + -100000000000).replace(/[018]/g, b);
+};
+
+$(function () {
+  var COUCH_URL = "https://rmuller.iriscouch.com:6984/events";
+  var pouch = new PouchDB(COUCH_URL);
+  var classes = [];
+  var location = {};
+
+  document.title = $('h2').first().text();
+
+  function updateLocation() {
+    navigator.geolocation.getCurrentPosition(function (position) {
+      location = {
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        altitude: position.coords.altitude,
+        accuracy: position.coords.accuracy,
+        altitudeAccuracy: position.coords.altitudeAccuracy,
+        heading: position.coords.heading,
+        speed: position.coords.speed,
+        timestamp: +position.timestamp
+      };
+    });
+  }
+  setInterval(updateLocation, 10000);
+  updateLocation();
+
+  var db = {
+    publish: function publish(_class, event) {
+      var opts = arguments[2] === undefined ? {} : arguments[2];
+      event._id = uuid();
+      event.meta = event.meta || {};
+      event.meta.ts = new Date().toString();
+      event.meta["class"] = _class;
+      event.meta.location = location;
+      event.meta.userAgent = navigator.userAgent;
+      console.log("Sending", event);
+      if (!opts.attachments || !opts.attachments.length) {
+        return pouch.put(event);
+      }
+      return pouch.put(event).then(function (doc) {
+        var att = opts.attachments[0];
+        return pouch.putAttachment(doc.id, att.name, doc.rev, att.blob, att.type);
+      });
+    },
+    fetch: function fetch() {
+      var opt = arguments[0] === undefined ? {} : arguments[0];
+      return pouch.query(function (doc) {
+        if (doc.meta && doc.meta.ts) {
+          emit(+new Date(doc.meta.ts), doc);
+        }
+      }, {
+        limit: opt.limit || 25,
+        descending: true
+      });
+    }
+  };
+
+  if (!(window.File && window.FileReader && window.FileList && window.Blob)) {
+    $("#file").hide();
+  }
+
+  $("#ok").click(function (e) {
+    e.stopPropagation();
+    try {
+      var event = jsyaml.load($("#event").val());
+      var $file = $("#file"),
+          files = $file[0].files,
+          fileContents,
+          fileStates;
+
+      if (files.length) {
+        fileContents = [];
+        fileStates = [];
+        _.forEach(files, function (file) {
+          var state = { done: false };
+          fileStates.push(state);
+          var reader = new FileReader();
+          var blob = file.slice(0, file.size - 1);
+          reader.onloadend = function (e) {
+            if (e.target.readyState == FileReader.DONE) {
+              state.done = true;
+              fileContents.push({
+                name: file.name,
+                size: file.size,
+                type: file.type,
+                blob: blob
+              });
+              if (_.all(fileStates, function (s) {
+                return s.done;
+              })) {
+                finish();
+              }
+            }
+          };
+          reader.readAsBinaryString(blob);
+        });
+      } else {
+        finish();
+      }
+      function finish() {
+        db.publish($("#_class").val(), event, { attachments: fileContents }).then(function () {
+          console.log("ok", arguments);
+          var tpl = _.template($("#event-tpl").html()),
+              $log = $("#log");
+          $log.prepend(tpl({ record: event }));
+        }, function (err) {
+          console.error(err);
+        });
+        $("#err").empty();
+        $("#event").val("");
+        $("#_class").val("");
+        $file.replaceWith($file = $file.clone(true));
+      }
+      return false;
+    } catch (e) {
+      $("#err").text(e.toString());
+      throw e;
+    }
+  });
+
+  $("#_class").remoteList({
+    source: function source(term, response) {
+      var re = new RegExp(term, "i");
+      console.log(term, classes.filter(function (c) {
+        return re.test(c);
+      }));
+      response(classes.filter(function (c) {
+        return re.test(c);
+      }));
+    }
+  });
+
+  db.fetch({ limit: 100 }).then(function (result) {
+    var results = _.flatten(result.rows.map(function (row) {
+      return row.values || row.value;
+    }));
+    classes = _.uniq(classes.concat(results.map(function (r) {
+      return r.meta && r.meta["class"];
+    }).filter(_.identity)));
+    var tpl = _.template($("#event-tpl").html()),
+        $log = $("#log");
+    _.sortBy(results, function (row) {
+      return +new Date(row.meta.ts);
+    });
+    results.forEach(function (row) {
+      return $log.append(tpl({ record: row }));
+    });
+  });
+});
+</script>
+
+</html>
